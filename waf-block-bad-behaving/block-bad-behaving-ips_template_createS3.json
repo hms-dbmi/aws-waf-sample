@@ -9,7 +9,7 @@
             "default": "S3 Location"
           },
           "Parameters": [
-            "CloudFrontAccessLogBucket"
+            "ALBAccessLogBucket"
           ]
         },
         {
@@ -23,8 +23,11 @@
         }
       ],
       "ParameterLabels": {
-        "CloudFrontAccessLogBucket": {
-          "default": "New CloudFront Access Log Bucket Name"
+        "ALBAccessLogBucket": {
+          "default": "New ALB Access Log Bucket Name"
+        },
+        "ALBCreateWAFACL": {
+          "default": "Create the WAF ACL with block rules"
         },
         "RequestThreshold": {
           "default": "Request Threshold"
@@ -36,10 +39,19 @@
     }
   },
   "Parameters": {
-    "CloudFrontAccessLogBucket": {
+    "ALBCreateWAFACL": {
+      "Type": "String",
+      "Default": "yes",
+      "AllowedValues": [
+        "yes",
+        "no"
+      ],
+      "Description": "Select Yes to create a new WAF ACL containing the included blocked IP rules"
+    },
+    "ALBAccessLogBucket": {
       "Type": "String",
       "Default": "",
-      "Description": "Enter the name of a new S3 bucket where the CloudFront log files are to be stored. Rules for bucket naming: http://amzn.to/1QXbleZ"
+      "Description": "Enter the name of a new S3 bucket where the ALB access log files are to be stored. Rules for bucket naming: http://amzn.to/1QXbleZ"
     },
     "RequestThreshold": {
       "Type": "Number",
@@ -52,24 +64,34 @@
       "Description": "Enter duration (in minutes) the IP will be blocked for. Default: 4 hours (240 minutes)"
     }
   },
+  "Conditions": {
+    "CreateACL": {
+      "Fn::Equals": [
+        {
+          "Ref": "ALBCreateAccessLogBucket"
+        },
+        "yes"
+      ]
+    }
+  },
   "Resources": {
     "WAFManualBlockSet": {
-      "Type": "AWS::WAF::IPSet",
+      "Type": "AWS::WAFRegional::IPSet",
       "Properties": {
-        "Name": "Manual Block Set"
+        "Name": "DBMI-ALB-MANUAL-BLOCK-SET"
       }
     },
     "WAFAutoBlockSet": {
-      "Type": "AWS::WAF::IPSet",
+      "Type": "AWS::WAFRegional::IPSet",
       "Properties": {
-        "Name": "Auto Block Set"
+        "Name": "DBMI-ALB-AUTO-BLOCK-SET"
       }
     },
     "WAFManualBlockRule": {
-      "Type": "AWS::WAF::Rule",
+      "Type": "AWS::WAFRegional::Rule",
       "DependsOn": "WAFManualBlockSet",
       "Properties": {
-        "Name": "Manual Block Rule",
+        "Name": "DBMI-ALB-MANUAL-BLOCK-RULE",
         "MetricName": "ManualBlockRule",
         "Predicates": [
           {
@@ -83,10 +105,10 @@
       }
     },
     "WAFAutoBlockRule": {
-      "Type": "AWS::WAF::Rule",
+      "Type": "AWS::WAFRegional::Rule",
       "DependsOn": "WAFAutoBlockSet",
       "Properties": {
-        "Name": "Auto Block Rule",
+        "Name": "DBMI-ALB-AUTO-BLOCK-RULE",
         "MetricName": "AutoBlockRule",
         "Predicates": [
           {
@@ -100,13 +122,14 @@
       }
     },
     "WAFWebACL": {
-      "Type": "AWS::WAF::WebACL",
+      "Type": "AWS::WAFRegional::WebACL",
+      "Condition": "CreateACL",
       "DependsOn": [
         "WAFManualBlockRule",
         "WAFAutoBlockRule"
       ],
       "Properties": {
-        "Name": "Malicious Requesters",
+        "Name": "DBMI-ALB-BLACKLIST-ACL",
         "DefaultAction": {
           "Type": "ALLOW"
         },
@@ -174,7 +197,7 @@
               "Statement": [
                 {
                   "Effect": "Allow",
-                  "Action": "waf:*",
+                  "Action": "waf-regional:*",
                   "Resource": "*"
                 }
               ]
@@ -235,10 +258,11 @@
         ]
       }
     },
-    "LambdaWAFBlacklistingFunction": {
+    "DBMIALBBlacklistFn": {
       "Type": "AWS::Lambda::Function",
       "DependsOn": "LambdaRole",
       "Properties": {
+        "FunctionName": "DBMI-ALB-BLACKLIST-FN",
         "Description": {
           "Fn::Join": [
             ":",
@@ -260,18 +284,8 @@
           ]
         },
         "Code": {
-          "S3Bucket": {
-            "Fn::Join": [
-              ".",
-              [
-                "awswaf",
-                {
-                  "Ref": "AWS::Region"
-                }
-              ]
-            ]
-          },
-          "S3Key": "block-bad-behaving-ips/parser.zip"
+          "S3Bucket": "dbmi-waf-artifacts",
+          "S3Key": "dbmi-alb-blacklist-fn.zip"
         },
         "Runtime": "python2.7",
         "MemorySize": "512",
@@ -280,11 +294,11 @@
     },
     "LambdaInvokePermission": {
       "Type": "AWS::Lambda::Permission",
-      "DependsOn": "LambdaWAFBlacklistingFunction",
+      "DependsOn": "DBMIALBBlacklistFn",
       "Properties": {
         "FunctionName": {
           "Fn::GetAtt": [
-            "LambdaWAFBlacklistingFunction",
+            "DBMIALBBlacklistFn",
             "Arn"
           ]
         },
@@ -295,12 +309,12 @@
         }
       }
     },
-    "S3CloudFrontAccessLogBucket": {
+    "S3ALBAccessLogBucket": {
       "Type": "AWS::S3::Bucket",
-      "DependsOn": "LambdaWAFBlacklistingFunction",
+      "DependsOn": "DBMIALBBlacklistFn",
       "Properties": {
         "BucketName": {
-          "Ref": "CloudFrontAccessLogBucket"
+          "Ref": "ALBAccessLogBucket"
         },
         "AccessControl": "Private",
         "NotificationConfiguration": {
@@ -319,7 +333,7 @@
               },
               "Function": {
                 "Fn::GetAtt": [
-                  "LambdaWAFBlacklistingFunction",
+                  "DBMIALBBlacklistFn",
                   "Arn"
                 ]
               }
@@ -331,10 +345,10 @@
     }
   },
   "Outputs": {
-    "CloudFrontAccessLogBucket": {
-      "Description": "CloudFront Access Log Bucket",
+    "ALBAccessLogBucket": {
+      "Description": "ALB Access Log Bucket",
       "Value": {
-        "Ref": "CloudFrontAccessLogBucket"
+        "Ref": "ALBAccessLogBucket"
       }
     },
     "RequestThreshold": {

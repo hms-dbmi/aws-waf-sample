@@ -13,6 +13,7 @@ import gzip
 import datetime
 import time
 import math
+from dateutil import parser
 
 print('Loading function')
 
@@ -34,10 +35,9 @@ API_CALL_NUM_RETRIES = 3
 OUTPUT_FILE_NAME = 'current_outstanding_requesters.json'
 
 LINE_FORMAT = {
-    'date': 0,
-    'time' : 1,
-    'source_ip' : 4,
-    'code' : 8
+    'datetime': 1,
+    'source_ip': 3,
+    'code': 8
 }
 
 #======================================================================================================================
@@ -67,11 +67,20 @@ def get_outstanding_requesters(bucket_name, key_name):
                     if line.startswith('#'):
                         continue
 
-                    line_data = line.split('\t')
+                    line_data = line.split(' ')
                     if line_data[LINE_FORMAT['code']] in BLOCK_ERROR_CODES:
-                        request_key = line_data[LINE_FORMAT['date']]
-                        request_key += '-' + line_data[LINE_FORMAT['time']][:-3]
-                        request_key += '-' + line_data[LINE_FORMAT['source_ip']]
+
+                        # Parse date
+                        date = parser.parse(line_data[LINE_FORMAT['datetime']])
+
+                        # Set components
+                        request_key = '{}-{}-{}'.format(date.year, date.month, date.day)
+                        request_key += '-{}:{}'.format(date.hour, date.minute)
+
+                        # Parse out IP
+                        request_key += '-{}'.format(line_data[LINE_FORMAT['source_ip']].split(':')[0])
+
+                        # Increment count if necessary
                         if request_key in result.keys():
                             result[request_key] += 1
                         else:
@@ -80,7 +89,7 @@ def get_outstanding_requesters(bucket_name, key_name):
                     num_requests += 1
 
                 except Exception, e:
-                    print ("[get_outstanding_requesters] \t\tError to process line: %s"%line)
+                    print ("[get_outstanding_requesters] \t\tError to process line: {}\n\n{}".format(line, e))
 
         #--------------------------------------------------------------------------------------------------------------
         print '[get_outstanding_requesters] \tKeep only outstanding requesters'
@@ -162,7 +171,7 @@ def write_output(key_name, outstanding_requesters):
 
 def waf_get_ip_set(ip_set_id):
     response = None
-    waf = boto3.client('waf')
+    waf = boto3.client('waf-regional')
 
     for attempt in range(API_CALL_NUM_RETRIES):
         try:
@@ -183,7 +192,7 @@ def waf_update_ip_set(ip_set_id, updates_list):
     response = None
 
     if updates_list != []:
-        waf = boto3.client('waf')
+        waf = boto3.client('waf-regional')
         for attempt in range(API_CALL_NUM_RETRIES):
             try:
                 response = waf.update_ip_set(IPSetId=ip_set_id,
@@ -244,7 +253,7 @@ def update_waf_ip_set(outstanding_requesters, ip_set_id, ip_set_already_blocked)
             return
 
         updates_list = []
-        waf = boto3.client('waf')
+        waf = boto3.client('waf-regional')
 
         #--------------------------------------------------------------------------------------------------------------
         print "[update_waf_ip_set] \tTruncate [if necessary] list to respect WAF limit"
@@ -329,14 +338,14 @@ def lambda_handler(event, context):
 
             outputs = {}
             cf = boto3.client('cloudformation')
-            stack_name = context.invoked_function_arn.split(':')[6].rsplit('-', 2)[0]
+            stack_name = context.invoked_function_arn.split(':')[6].rsplit('-', 1)[0]
             response = cf.describe_stacks(StackName=stack_name)
             for e in response['Stacks'][0]['Outputs']:
                 outputs[e['OutputKey']] = e['OutputValue']
 
             if OUTPUT_BUCKET == None:
-                if 'CloudFrontAccessLogBucket' in outputs.keys():
-                    OUTPUT_BUCKET = outputs['CloudFrontAccessLogBucket']
+                if 'ALBAccessLogBucket' in outputs.keys():
+                    OUTPUT_BUCKET = outputs['ALBAccessLogBucket']
                 else:
                     OUTPUT_BUCKET = bucket_name
             if IP_SET_ID_MANUAL_BLOCK == None:
@@ -377,7 +386,7 @@ def lambda_handler(event, context):
         
         cw = boto3.client('cloudwatch')
         response = cw.put_metric_data(
-            Namespace='WAFReactiveBlacklist-%s'%OUTPUT_BUCKET,
+            Namespace='DBMI-ALB-BLACKLIST-%s'%OUTPUT_BUCKET,
             MetricData=[
                 {
                     'MetricName': 'IPBlocked',
